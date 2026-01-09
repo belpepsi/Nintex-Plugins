@@ -1,123 +1,216 @@
 /**
  * central-table-grid.js
  *
- * A lightweight table/grid web component for Nintex NAC Form Plugins.
+ * Nintex Automation Cloud (NAC) Form Plugin + Web Component.
+ *
  * Features:
- *  - Define columns via config (labels, field names, types, editable)
+ *  - Configurable columns (field, label, type, editable)
  *  - Add / delete rows
  *  - Inline edit cells
- *  - Sort by clicking column headers (asc/desc)
- *  - Emits `ntx-value-change` with the updated value payload
+ *  - Sorting by clicking headers (asc/desc)
+ *  - Emits `ntx-value-change` with { rows: [...] } so NAC stores the value
  *
- * Expected value shape:
+ * Value shape:
  *  { rows: Array<Record<string, any>> }
  *
- * Configuration shape:
- *  {
- *    columns: [
- *      { field: "item", label: "Item", type: "text", editable: true },
- *      { field: "qty", label: "Qty", type: "number", editable: true },
- *      { field: "price", label: "Price", type: "number", editable: true },
- *    ],
- *    allowAdd: true,
- *    allowDelete: true,
- *    allowSort: true,
- *    minRows: 0,
- *    maxRows: null,
- *    readOnly: false
- *  }
+ * Columns shape (designer-time property):
+ *  [
+ *    { field: "item", label: "Item", type: "text", editable: true },
+ *    { field: "qty", label: "Qty", type: "number", editable: true },
+ *    { field: "active", label: "Active", type: "boolean", editable: true }
+ *  ]
  */
 
 class CentralTableGrid extends HTMLElement {
+  // ---------- Nintex Form Plugin Contract ----------
+  // Nintex validates this during registration.
+  static async getMetaConfig() {
+    return {
+      controlName: "Central Table Grid",
+      version: "1.0", // If Nintex rejects this, you may need to bundle with @nintex/form-plugin-contract.
+
+      description: "Editable table grid with add/delete rows and sortable columns.",
+      groupName: "Central Custom Controls",
+
+      properties: {
+        // Stored value submitted with the form
+        value: {
+          type: "object",
+          title: "Grid value",
+          isValueField: true,
+          defaultValue: { rows: [] },
+        },
+
+        // Designer-time configuration
+        columns: {
+          type: "object",
+          title: "Columns",
+          description:
+            'Array of column definitions: [{ field, label, type: "text|number|boolean", editable }]',
+          defaultValue: [
+            { field: "col1", label: "Column 1", type: "text", editable: true },
+          ],
+        },
+
+        allowAdd: { type: "boolean", title: "Allow add rows", defaultValue: true },
+        allowDelete: { type: "boolean", title: "Allow delete rows", defaultValue: true },
+        allowSort: { type: "boolean", title: "Allow sorting", defaultValue: true },
+
+        minRows: { type: "number", title: "Minimum rows", defaultValue: 0 },
+        maxRows: {
+          type: "number",
+          title: "Maximum rows (0 = unlimited)",
+          defaultValue: 0,
+        },
+
+        readOnly: { type: "boolean", title: "Read only", defaultValue: false },
+      },
+    };
+  }
+
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
 
-    /** @type {any} */
+    // Internal config (mirrors designer-time properties)
     this._config = {
       columns: [],
       allowAdd: true,
       allowDelete: true,
       allowSort: true,
       minRows: 0,
-      maxRows: null,
+      maxRows: 0, // 0 = unlimited
       readOnly: false,
     };
 
-    /** @type {{ rows: Array<Record<string, any>> }} */
+    // Stored value
     this._value = { rows: [] };
 
-    this._sort = { field: null, dir: "asc" }; // dir: "asc" | "desc"
+    // Sorting state
+    this._sort = { field: null, dir: "asc" }; // "asc" | "desc"
+
+    // Bindings
     this._onAddRow = this._onAddRow.bind(this);
   }
 
-  /**
-   * Optional: observe attributes if your plugin wrapper passes JSON via attributes.
-   * You can set:
-   *  - config='{"columns":[...]}'
-   *  - value='{"rows":[...]}'
-   */
+  // If your wrapper passes JSON via attributes, these are supported.
   static get observedAttributes() {
-    return ["config", "value", "readonly"];
+    return ["value", "columns", "readonly"];
   }
 
   attributeChangedCallback(name, oldValue, newValue) {
     if (oldValue === newValue) return;
 
     try {
-      if (name === "config" && newValue) {
-        this.config = JSON.parse(newValue);
-      }
       if (name === "value" && newValue) {
         this.value = JSON.parse(newValue);
       }
+      if (name === "columns" && newValue) {
+        this.columns = JSON.parse(newValue);
+      }
       if (name === "readonly") {
-        this._config.readOnly = newValue === "true" || newValue === "" || newValue === "1";
-        this._render();
+        this.readOnly = newValue === "true" || newValue === "" || newValue === "1";
       }
     } catch (e) {
       console.warn("[central-table-grid] Failed to parse attribute:", name, e);
     }
   }
 
-  /** NAC / host can set config as a property */
-  set config(cfg) {
-    this._config = {
-      ...this._config,
-      ...(cfg || {}),
-      columns: Array.isArray(cfg?.columns) ? cfg.columns : this._config.columns,
-    };
-    this._render();
-  }
-  get config() {
-    return this._config;
-  }
+  // ----- Properties that Nintex/host will set -----
+  // Nintex typically sets plugin properties as element properties at runtime.
 
-  /** NAC / host can set value as a property */
   set value(val) {
     const rows = Array.isArray(val?.rows) ? val.rows : [];
     this._value = { rows };
+    this._ensureMinRows();
     this._render();
   }
   get value() {
     return this._value;
   }
 
+  set columns(cols) {
+    this._config.columns = Array.isArray(cols) ? cols : [];
+    this._ensureRowShape();
+    this._render();
+  }
+  get columns() {
+    return this._config.columns;
+  }
+
+  set allowAdd(v) {
+    this._config.allowAdd = !!v;
+    this._render();
+  }
+  get allowAdd() {
+    return this._config.allowAdd;
+  }
+
+  set allowDelete(v) {
+    this._config.allowDelete = !!v;
+    this._render();
+  }
+  get allowDelete() {
+    return this._config.allowDelete;
+  }
+
+  set allowSort(v) {
+    this._config.allowSort = !!v;
+    this._render();
+  }
+  get allowSort() {
+    return this._config.allowSort;
+  }
+
+  set minRows(v) {
+    const n = Number(v);
+    this._config.minRows = Number.isFinite(n) ? Math.max(0, n) : 0;
+    this._ensureMinRows();
+    this._render();
+  }
+  get minRows() {
+    return this._config.minRows;
+  }
+
+  set maxRows(v) {
+    const n = Number(v);
+    this._config.maxRows = Number.isFinite(n) ? Math.max(0, n) : 0;
+    this._render();
+  }
+  get maxRows() {
+    return this._config.maxRows;
+  }
+
+  set readOnly(v) {
+    this._config.readOnly = !!v;
+    this._render();
+  }
+  get readOnly() {
+    return this._config.readOnly;
+  }
+
   connectedCallback() {
+    this._ensureMinRows();
+    this._ensureRowShape();
     this._render();
   }
 
-  /** Emit change so Nintex stores the plugin value */
-  _emitValueChange() {
-    const payload = this.value; // { rows: [...] }
+  // ----- Helpers -----
 
+  _emitValueChange() {
+    // Nintex listens for this event name
     this.dispatchEvent(
       new CustomEvent("ntx-value-change", {
         bubbles: true,
         composed: true,
-        detail: payload,
+        detail: this.value, // { rows: [...] }
       })
     );
+  }
+
+  _maxRowsLimit() {
+    // 0 means unlimited
+    return this._config.maxRows && this._config.maxRows > 0 ? this._config.maxRows : null;
   }
 
   _coerceType(type, raw) {
@@ -128,25 +221,52 @@ class CentralTableGrid extends HTMLElement {
     if (type === "checkbox" || type === "boolean") {
       return !!raw;
     }
-    // default: string
     return raw ?? "";
+  }
+
+  _defaultCellValue(type) {
+    if (type === "number") return 0;
+    if (type === "checkbox" || type === "boolean") return false;
+    return "";
   }
 
   _getDefaultRow() {
     const row = {};
     for (const col of this._config.columns) {
       if (!col?.field) continue;
-      if (col.type === "number") row[col.field] = 0;
-      else if (col.type === "checkbox" || col.type === "boolean") row[col.field] = false;
-      else row[col.field] = "";
+      row[col.field] = this._defaultCellValue(col.type || "text");
     }
     return row;
+  }
+
+  _ensureRowShape() {
+    // Ensure every row has every column field (so render/edit is stable)
+    const cols = Array.isArray(this._config.columns) ? this._config.columns : [];
+    if (!Array.isArray(this._value.rows)) this._value.rows = [];
+
+    this._value.rows = this._value.rows.map((r) => {
+      const row = { ...(r || {}) };
+      for (const c of cols) {
+        if (!c?.field) continue;
+        if (!(c.field in row)) row[c.field] = this._defaultCellValue(c.type || "text");
+      }
+      return row;
+    });
+  }
+
+  _ensureMinRows() {
+    const min = this._config.minRows ?? 0;
+    if (!Array.isArray(this._value.rows)) this._value.rows = [];
+
+    while (this._value.rows.length < min) {
+      this._value.rows.push(this._getDefaultRow());
+    }
   }
 
   _canAdd() {
     if (this._config.readOnly) return false;
     if (!this._config.allowAdd) return false;
-    const max = this._config.maxRows;
+    const max = this._maxRowsLimit();
     return max == null ? true : this._value.rows.length < max;
   }
 
@@ -173,7 +293,7 @@ class CentralTableGrid extends HTMLElement {
         const bn = Number(bv ?? 0);
         return an - bn;
       }
-      // string compare
+
       const as = String(av ?? "").toLowerCase();
       const bs = String(bv ?? "").toLowerCase();
       return as.localeCompare(bs);
@@ -202,7 +322,7 @@ class CentralTableGrid extends HTMLElement {
   _onDeleteRow(indexInRendered) {
     if (!this._canDelete()) return;
 
-    // rendered rows may be sorted; we need to delete the correct underlying row object
+    // rendered rows may be sorted; delete correct underlying object
     const renderedRows = this._sortRows(this._value.rows);
     const rowToDelete = renderedRows[indexInRendered];
     const idx = this._value.rows.indexOf(rowToDelete);
@@ -304,7 +424,6 @@ class CentralTableGrid extends HTMLElement {
                     </td>`;
                   }
 
-                  // text
                   return `<td>
                     <input type="text" data-r="${rIdx}" data-f="${c.field}" value="${String(val ?? "")}" />
                   </td>`;
@@ -347,18 +466,16 @@ class CentralTableGrid extends HTMLElement {
       </div>
     `;
 
-    // Wire events
+    // Events
     const addBtn = this.shadowRoot.getElementById("addRow");
     if (addBtn) addBtn.addEventListener("click", this._onAddRow);
 
-    // Sorting headers
     if (this._config.allowSort) {
       this.shadowRoot.querySelectorAll("th[data-sort]").forEach((th) => {
         th.addEventListener("click", () => this._toggleSort(th.getAttribute("data-sort")));
       });
     }
 
-    // Cell edits
     this.shadowRoot.querySelectorAll("input[data-r][data-f]").forEach((input) => {
       const r = Number(input.getAttribute("data-r"));
       const f = input.getAttribute("data-f");
@@ -368,11 +485,10 @@ class CentralTableGrid extends HTMLElement {
           this._onEditCell(r, f, e.target.checked);
         });
       } else {
-        // Commit on blur (more performant than every keystroke)
+        // Commit on blur for better performance
         input.addEventListener("blur", (e) => {
           this._onEditCell(r, f, e.target.value);
         });
-        // Also commit on Enter
         input.addEventListener("keydown", (e) => {
           if (e.key === "Enter") {
             e.preventDefault();
@@ -382,7 +498,6 @@ class CentralTableGrid extends HTMLElement {
       }
     });
 
-    // Delete buttons
     this.shadowRoot.querySelectorAll("button[data-del]").forEach((btn) => {
       btn.addEventListener("click", () => {
         const rIdx = Number(btn.getAttribute("data-del"));
