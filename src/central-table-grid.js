@@ -1,65 +1,48 @@
-globalThis.__CENTRAL_TABLE_GRID__ = globalThis.__CENTRAL_TABLE_GRID__ || {};
-import { pluginContractSchema } from "@nintex/form-plugin-contract";
-
 /**
- * Central Table Grid
- * - Configurable columns via columnsJson (string)
- * - Add/delete rows
- * - Edit cells
- * - Sort by clicking headers
+ * Central Table Grid for Nintex NAC
  *
- * Stored value shape:
- *   { rows: Array<Record<string, any>> }
- *
- * columnsJson example:
- * [
- *  {"field":"item","label":"Item","type":"text","editable":true},
- *  {"field":"qty","label":"Qty","type":"number","editable":true},
- *  {"field":"active","label":"Active","type":"boolean","editable":true}
- * ]
+ * IMPORTANT: In NAC plugin contract, value fields must be primitive types.
+ * So we store the grid as a JSON STRING:
+ *   value = '[{"item":"Apples","qty":3}]'
  */
 
 class CentralTableGrid extends HTMLElement {
   static async getMetaConfig() {
-    const contract = {
+    return {
       version: "1",
       controlName: "Central Table Grid",
       fallbackDisableSubmit: false,
       description: "Editable table grid with add/delete rows and sortable columns.",
       groupName: "Central Custom Controls",
       properties: {
+        // ✅ Must be a primitive type. We'll store JSON string here.
         value: {
-          type: "object",
+          type: "string",
           title: "Grid value",
           isValueField: true,
-          defaultValue: { rows: [] }
+          defaultValue: "[]"
         },
+
+        // ✅ Title must pass Nintex regex (avoid parentheses/special chars)
         columnsJson: {
           type: "string",
-          title: "Columns (JSON)",
-          defaultValue:
-            '[{"field":"col1","label":"Column 1","type":"text","editable":true}]',
+          title: "Columns JSON",
+          defaultValue: '[{"field":"col1","label":"Column 1","type":"text","editable":true}]',
           description:
             'JSON array like: [{"field":"item","label":"Item","type":"text","editable":true},{"field":"qty","label":"Qty","type":"number","editable":true}]'
         },
+
         allowAdd: { type: "boolean", title: "Allow add rows", defaultValue: true },
         allowDelete: { type: "boolean", title: "Allow delete rows", defaultValue: true },
         allowSort: { type: "boolean", title: "Allow sorting", defaultValue: true },
         minRows: { type: "integer", title: "Minimum rows", defaultValue: 0 },
-        maxRows: { type: "integer", title: "Maximum rows (0 = unlimited)", defaultValue: 0 },
+
+        // ✅ Title must pass regex; keep it simple
+        maxRows: { type: "integer", title: "Maximum rows", defaultValue: 0 },
+
         readOnly: { type: "boolean", title: "Read only", defaultValue: false }
       }
     };
-
-    // Validate contract early (helps avoid "failed to load plugin definition")
-    const result = pluginContractSchema.safeParse(contract);
-if (!result.success) {
-  // Don’t throw; return the contract so Nintex can validate it on its side.
-  // (Optionally log to console)
-  
-  console.warn(result.error);
-}
-    return contract;
   }
 
   constructor() {
@@ -76,15 +59,13 @@ if (!result.success) {
       readOnly: false
     };
 
-    this._value = { rows: [] };
-    this._columnsJson = "";
+    this._rows = []; // internal array of row objects
     this._sort = { field: null, dir: "asc" };
 
     this._onAddRow = this._onAddRow.bind(this);
   }
 
   connectedCallback() {
-    // In case the host hasn't set props yet
     const attrCols = this.getAttribute("columnsjson") || this.getAttribute("columnsJson");
     if (attrCols && !this._columnsJson) this.columnsJson = attrCols;
 
@@ -93,14 +74,27 @@ if (!result.success) {
     this._render();
   }
 
-  // ---- Nintex-set properties ----
+  // ---------------- Nintex-set properties ----------------
+
+  // value is a JSON string representing rows: '[{...},{...}]'
   set value(v) {
-    this._value = { rows: Array.isArray(v?.rows) ? v.rows : [] };
+    const s = typeof v === "string" ? v : "[]";
+    this._valueStr = s;
+
+    try {
+      const parsed = JSON.parse(s);
+      this._rows = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      this._rows = [];
+    }
+
     this._ensureMinRows();
     this._ensureRowShape();
     this._render();
   }
-  get value() { return this._value; }
+  get value() {
+    return typeof this._valueStr === "string" ? this._valueStr : "[]";
+  }
 
   set columnsJson(json) {
     this._columnsJson = typeof json === "string" ? json : "";
@@ -113,24 +107,29 @@ if (!result.success) {
   set allowAdd(v) { this._config.allowAdd = !!v; this._render(); }
   set allowDelete(v) { this._config.allowDelete = !!v; this._render(); }
   set allowSort(v) { this._config.allowSort = !!v; this._render(); }
-  set minRows(v) { this._config.minRows = Math.max(0, Number(v) || 0); this._ensureMinRows(); this._render(); }
+  set minRows(v) {
+    this._config.minRows = Math.max(0, Number(v) || 0);
+    this._ensureMinRows();
+    this._render();
+  }
   set maxRows(v) { this._config.maxRows = Math.max(0, Number(v) || 0); this._render(); }
   set readOnly(v) { this._config.readOnly = !!v; this._render(); }
 
-  // ---- Helpers ----
+  // ---------------- Helpers ----------------
+
   _emitValueChange() {
+    const nextStr = JSON.stringify(this._rows ?? []);
+    this._valueStr = nextStr;
+
     this.dispatchEvent(new CustomEvent("ntx-value-change", {
       bubbles: true,
       composed: true,
-      detail: this.value
+      detail: nextStr
     }));
   }
 
   _applyColumnsFromColumnsJson(json) {
-    if (!json) {
-      this._config.columns = [];
-      return;
-    }
+    if (!json) { this._config.columns = []; return; }
     try {
       const parsed = JSON.parse(json);
       if (!Array.isArray(parsed)) return;
@@ -144,13 +143,11 @@ if (!result.success) {
           editable: !!c.editable
         }));
     } catch {
-      // Keep last-good columns; don't crash on invalid JSON.
+      // keep last good config
     }
   }
 
-  _maxRowsLimit() {
-    return this._config.maxRows > 0 ? this._config.maxRows : null;
-  }
+  _maxRowsLimit() { return this._config.maxRows > 0 ? this._config.maxRows : null; }
 
   _defaultCellValue(type) {
     if (type === "number") return 0;
@@ -165,18 +162,16 @@ if (!result.success) {
   }
 
   _ensureMinRows() {
-    while (this._value.rows.length < (this._config.minRows || 0)) {
-      this._value.rows.push(this._getDefaultRow());
+    while ((this._rows?.length ?? 0) < (this._config.minRows || 0)) {
+      this._rows.push(this._getDefaultRow());
     }
   }
 
   _ensureRowShape() {
     const cols = this._config.columns || [];
-    this._value.rows = (this._value.rows || []).map(r => {
+    this._rows = (this._rows || []).map(r => {
       const row = { ...(r || {}) };
-      for (const c of cols) {
-        if (!(c.field in row)) row[c.field] = this._defaultCellValue(c.type);
-      }
+      for (const c of cols) if (!(c.field in row)) row[c.field] = this._defaultCellValue(c.type);
       return row;
     });
   }
@@ -184,18 +179,18 @@ if (!result.success) {
   _canAdd() {
     if (this._config.readOnly || !this._config.allowAdd) return false;
     const max = this._maxRowsLimit();
-    return max == null ? true : this._value.rows.length < max;
+    return max == null ? true : this._rows.length < max;
   }
 
   _canDelete() {
     if (this._config.readOnly || !this._config.allowDelete) return false;
-    return this._value.rows.length > (this._config.minRows || 0);
+    return this._rows.length > (this._config.minRows || 0);
   }
 
   _sortRows(rows) {
     if (!this._config.allowSort || !this._sort.field) return rows;
-
     const { field, dir } = this._sort;
+
     const col = this._config.columns.find(c => c.field === field);
     const type = col?.type || "text";
 
@@ -218,7 +213,7 @@ if (!result.success) {
 
   _onAddRow() {
     if (!this._canAdd()) return;
-    this._value.rows = [...this._value.rows, this._getDefaultRow()];
+    this._rows = [...this._rows, this._getDefaultRow()];
     this._emitValueChange();
     this._render();
   }
@@ -226,14 +221,14 @@ if (!result.success) {
   _onDeleteRow(renderedIndex) {
     if (!this._canDelete()) return;
 
-    const rendered = this._sortRows(this._value.rows);
+    const rendered = this._sortRows(this._rows);
     const rowToDelete = rendered[renderedIndex];
-    const idx = this._value.rows.indexOf(rowToDelete);
+    const idx = this._rows.indexOf(rowToDelete);
     if (idx < 0) return;
 
-    const next = [...this._value.rows];
+    const next = [...this._rows];
     next.splice(idx, 1);
-    this._value.rows = next;
+    this._rows = next;
 
     this._emitValueChange();
     this._render();
@@ -242,15 +237,15 @@ if (!result.success) {
   _onEditCell(renderedIndex, field, rawValue) {
     if (this._config.readOnly) return;
 
-    const rendered = this._sortRows(this._value.rows);
+    const rendered = this._sortRows(this._rows);
     const rowRef = rendered[renderedIndex];
-    const idx = this._value.rows.indexOf(rowRef);
+    const idx = this._rows.indexOf(rowRef);
     if (idx < 0) return;
 
     const col = this._config.columns.find(c => c.field === field);
     const type = col?.type || "text";
 
-    const nextRows = [...this._value.rows];
+    const nextRows = [...this._rows];
     const nextRow = { ...(nextRows[idx] || {}) };
 
     if (type === "number") nextRow[field] = Number.isFinite(Number(rawValue)) ? Number(rawValue) : null;
@@ -258,14 +253,14 @@ if (!result.success) {
     else nextRow[field] = rawValue ?? "";
 
     nextRows[idx] = nextRow;
-    this._value.rows = nextRows;
+    this._rows = nextRows;
 
     this._emitValueChange();
   }
 
   _render() {
     const cols = this._config.columns || [];
-    const rows = this._sortRows(this._value.rows || []);
+    const rows = this._sortRows(this._rows || []);
 
     const style = `
       :host { display:block; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
@@ -295,7 +290,7 @@ if (!result.success) {
 
     const bodyRows = rows.length === 0
       ? `<tr><td class="empty" colspan="${cols.length + (this._config.allowDelete ? 1 : 0)}">
-           <span class="muted">No rows. ${this._canAdd() ? "Click “Add row” to begin." : ""}</span>
+           <span class="muted">No rows. ${this._canAdd() ? "Click Add row to begin." : ""}</span>
          </td></tr>`
       : rows.map((row, rIdx) => {
           const tds = cols.map(c => {
@@ -363,7 +358,7 @@ if (!result.success) {
   }
 }
 
+// Safe define (prevents double-load errors)
 if (!customElements.get("central-table-grid")) {
   customElements.define("central-table-grid", CentralTableGrid);
 }
-
