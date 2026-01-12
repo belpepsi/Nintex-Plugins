@@ -7,8 +7,14 @@ export default defineConfig({
     lib: {
       entry: "src/central-table-grid.js",
       name: "CentralTableGridPlugin",
-      formats: ["es"],
+      formats: ["iife"],                 // <-- IMPORTANT (not "es")
       fileName: () => "central-table-grid.js"
+    },
+    rollupOptions: {
+      output: {
+        inlineDynamicImports: true
+      }
     }
   }
 });
+
