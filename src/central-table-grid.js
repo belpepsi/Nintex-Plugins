@@ -1,3 +1,4 @@
+globalThis.__CENTRAL_TABLE_GRID__ = globalThis.__CENTRAL_TABLE_GRID__ || {};
 import { pluginContractSchema } from "@nintex/form-plugin-contract";
 
 /**
@@ -51,7 +52,13 @@ class CentralTableGrid extends HTMLElement {
     };
 
     // Validate contract early (helps avoid "failed to load plugin definition")
-    pluginContractSchema.parse(contract);
+    const result = pluginContractSchema.safeParse(contract);
+if (!result.success) {
+  // Don’t throw; return the contract so Nintex can validate it on its side.
+  // (Optionally log to console)
+  
+  console.warn(result.error);
+}
     return contract;
   }
 
