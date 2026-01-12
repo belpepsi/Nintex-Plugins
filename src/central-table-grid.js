@@ -356,4 +356,7 @@ class CentralTableGrid extends HTMLElement {
   }
 }
 
-customElements.define("central-table-grid", CentralTableGrid);
+if (!customElements.get("central-table-grid")) {
+  customElements.define("central-table-grid", CentralTableGrid);
+}
+
